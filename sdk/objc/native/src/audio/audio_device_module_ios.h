@@ -58,6 +58,9 @@ class AudioDeviceModuleIOS : public AudioDeviceModule {
   int32_t SetPlayoutDevice(WindowsDeviceType device) override;
   int32_t SetRecordingDevice(uint16_t index) override;
   int32_t SetRecordingDevice(WindowsDeviceType device) override;
+  
+  // Add this method to get the current recording device
+  int32_t GetRecordingDevice() const override;
 
   // Audio transport initialization
   int32_t PlayoutIsAvailable(bool* available) override;

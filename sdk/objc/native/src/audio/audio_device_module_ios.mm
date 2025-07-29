@@ -461,7 +461,7 @@ AudioDeviceModuleIOS::AudioDeviceModuleIOS(bool bypass_voice_processing)
     CHECKinitialized_();
     uint16_t nRecordingDevices = audio_device_->RecordingDevices();
     RTC_DLOG(LS_INFO) << "output: " << nRecordingDevices;
-    return (int16_t)nRecordingDevices;
+    return (int16_t)(nRecordingDevices);
   }
 
   int32_t AudioDeviceModuleIOS::SetRecordingDevice(uint16_t index) {
@@ -475,6 +475,16 @@ AudioDeviceModuleIOS::AudioDeviceModuleIOS(bool bypass_voice_processing)
     CHECKinitialized_();
     return audio_device_->SetRecordingDevice(device);
   }
+
+  int32_t AudioDeviceModuleIOS::GetRecordingDevice() const {
+    RTC_DLOG(LS_INFO) << __FUNCTION__;
+    if (!initialized_) {
+      return -1;
+    }
+    return audio_device_->GetRecordingDevice();
+  }
+
+
 
   int32_t AudioDeviceModuleIOS::InitPlayout() {
     RTC_DLOG(LS_INFO) << __FUNCTION__;

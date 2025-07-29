@@ -114,6 +114,11 @@ class AudioDeviceIOS : public AudioDeviceGeneric,
   int32_t SetRecordingDevice(uint16_t index) override;
   int32_t SetRecordingDevice(
       AudioDeviceModule::WindowsDeviceType device) override;
+  int32_t GetRecordingDevice() const override;
+  
+  // Automatically select the best available input device (USB/Bluetooth over built-in)
+  void SelectBestAvailableInputDevice();
+  
   int32_t InitSpeaker() override;
   bool SpeakerIsInitialized() const override;
   int32_t InitMicrophone() override;
@@ -305,6 +310,10 @@ class AudioDeviceIOS : public AudioDeviceGeneric,
   // Ratio between mach tick units and nanosecond. Used to change mach tick
   // units to nanoseconds.
   double machTickUnitsToNanoseconds_;
+
+  // Detached thread checkers.
+  // Add this new member variable at the end of the private section
+  int32_t current_recording_device_index_;
 };
 }  // namespace ios_adm
 }  // namespace webrtc

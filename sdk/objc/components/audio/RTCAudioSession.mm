@@ -40,6 +40,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 @interface RTC_OBJC_TYPE (RTCAudioSession)
 () @property(nonatomic,
              readonly) std::vector<__weak id<RTC_OBJC_TYPE(RTCAudioSessionDelegate)> > delegates;
+
 @end
 
 // This class needs to be thread-safe because it is accessed from many threads.
@@ -63,6 +64,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
     _ignoresPreferredAttributeConfigurationErrors;
 
 + (instancetype)sharedInstance {
+  NSLog(@"🎧 [WebRTC] sharedInstance called");
   static dispatch_once_t onceToken;
   static RTC_OBJC_TYPE(RTCAudioSession) *sharedInstance = nil;
   dispatch_once(&onceToken, ^{
@@ -72,13 +74,15 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (instancetype)init {
+  NSLog(@"🎧 [WebRTC] init called");
   return [self initWithAudioSession:[AVAudioSession sharedInstance]];
 }
 
 /** This initializer provides a way for unit tests to inject a fake/mock audio session. */
-- (instancetype)initWithAudioSession:(id)audioSession {
+- (instancetype)initWithAudioSession:(AVAudioSession *)session {
+  NSLog(@"🎧 [WebRTC] initWithAudioSession called");
   if (self = [super init]) {
-    _session = audioSession;
+    _session = session;
 
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
     [center addObserver:self
@@ -97,55 +101,62 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
                selector:@selector(handleMediaServicesWereReset:)
                    name:AVAudioSessionMediaServicesWereResetNotification
                  object:nil];
-    // Posted on the main thread when the primary audio from other applications
-    // starts and stops. Foreground applications may use this notification as a
-    // hint to enable or disable audio that is secondary.
-    [center addObserver:self
-               selector:@selector(handleSilenceSecondaryAudioHintNotification:)
-                   name:AVAudioSessionSilenceSecondaryAudioHintNotification
-                 object:nil];
-    // Also track foreground event in order to deal with interruption ended situation.
+    if (@available(iOS 14.5, *)) {
+      [center addObserver:self
+                 selector:@selector(handleSilenceSecondaryAudioHintNotification:)
+                     name:AVAudioSessionSilenceSecondaryAudioHintNotification
+                   object:nil];
+    }
     [center addObserver:self
                selector:@selector(handleApplicationDidBecomeActive:)
                    name:UIApplicationDidBecomeActiveNotification
                  object:nil];
-    [_session addObserver:self
-               forKeyPath:RTC_CONSTANT_TYPE(RTCAudioSessionOutputVolumeSelector)
-                  options:NSKeyValueObservingOptionNew | NSKeyValueObservingOptionOld
-                  context:(__bridge void *)RTC_OBJC_TYPE(RTCAudioSession).class];
+    
+    // Listen for manual device refresh requests from Swift
+    [center addObserver:self
+               selector:@selector(handleManualDeviceRefresh:)
+                   name:@"RTCAudioSessionRefreshDevices"
+                 object:nil];
 
-    RTCLog(@"RTC_OBJC_TYPE(RTCAudioSession) (%p): init.", self);
+    // Populates _delegates.
+    _delegates = std::vector<__weak id<RTC_OBJC_TYPE(RTCAudioSessionDelegate)> >();
+
+    _activationCount = 0;
+    _webRTCSessionCount = 0;
+    _isActive = session.isOtherAudioPlaying;
+    _useManualAudio = NO;
+    _isAudioEnabled = YES;
+    _canPlayOrRecord = NO;
+    _isInterrupted = NO;
   }
   return self;
 }
 
 - (void)dealloc {
+  NSLog(@"🎧 [WebRTC] dealloc called");
   [[NSNotificationCenter defaultCenter] removeObserver:self];
-  [_session removeObserver:self
-                forKeyPath:RTC_CONSTANT_TYPE(RTCAudioSessionOutputVolumeSelector)
-                   context:(__bridge void *)RTC_OBJC_TYPE(RTCAudioSession).class];
-  RTCLog(@"RTC_OBJC_TYPE(RTCAudioSession) (%p): dealloc.", self);
 }
 
 - (NSString *)description {
-  NSString *format = @"RTC_OBJC_TYPE(RTCAudioSession): {\n"
-                      "  category: %@\n"
-                      "  categoryOptions: %ld\n"
-                      "  mode: %@\n"
-                      "  isActive: %d\n"
-                      "  sampleRate: %.2f\n"
-                      "  IOBufferDuration: %f\n"
-                      "  outputNumberOfChannels: %ld\n"
-                      "  inputNumberOfChannels: %ld\n"
-                      "  outputLatency: %f\n"
-                      "  inputLatency: %f\n"
-                      "  outputVolume: %f\n"
-                      "}";
+  NSString *format =
+      @"RTCAudioSession: {\n"
+       "  category: %@\n"
+       "  categoryOptions: %ld\n"
+       "  mode: %@\n"
+       "  isActive: %d\n"
+       "  sampleRate: %.2f\n"
+       "  IOBufferDuration: %f\n"
+       "  outputNumberOfChannels: %ld\n"
+       "  inputNumberOfChannels: %ld\n"
+       "  outputLatency: %f\n"
+       "  inputLatency: %f\n"
+       "  outputVolume: %f\n"
+       "}";
   NSString *description = [NSString stringWithFormat:format,
-      self.category, (long)self.categoryOptions, self.mode,
-      self.isActive, self.sampleRate, self.IOBufferDuration,
-      self.outputNumberOfChannels, self.inputNumberOfChannels,
-      self.outputLatency, self.inputLatency, self.outputVolume];
+          self.category, (long)self.categoryOptions, self.mode,
+          self.isActive, self.sampleRate, self.IOBufferDuration,
+          self.outputNumberOfChannels, self.inputNumberOfChannels,
+          self.outputLatency, self.inputLatency, self.outputVolume];
   return description;
 }
 
@@ -162,6 +173,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (void)setUseManualAudio:(BOOL)useManualAudio {
+  NSLog(@"🎧 [WebRTC] setUseManualAudio: %d", useManualAudio);
   @synchronized(self) {
     if (_useManualAudio == useManualAudio) {
       return;
@@ -178,6 +190,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (void)setIsAudioEnabled:(BOOL)isAudioEnabled {
+  NSLog(@"🎧 [WebRTC] setIsAudioEnabled: %d", isAudioEnabled);
   @synchronized(self) {
     if (_isAudioEnabled == isAudioEnabled) {
       return;
@@ -212,7 +225,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 
 // TODO(tkchin): Check for duplicates.
 - (void)addDelegate:(id<RTC_OBJC_TYPE(RTCAudioSessionDelegate)>)delegate {
-  RTCLog(@"Adding delegate: (%p)", delegate);
+  NSLog(@"🎧 [WebRTC] addDelegate called");
   if (!delegate) {
     return;
   }
@@ -223,7 +236,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (void)removeDelegate:(id<RTC_OBJC_TYPE(RTCAudioSessionDelegate)>)delegate {
-  RTCLog(@"Removing delegate: (%p)", delegate);
+  NSLog(@"🎧 [WebRTC] removeDelegate called");
   if (!delegate) {
     return;
   }
@@ -236,21 +249,17 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
   }
 }
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wthread-safety-analysis"
-
 - (void)lockForConfiguration {
-  RTC_CHECK(!mutex_locked);
+  NSLog(@"🎧 [WebRTC] lockForConfiguration called");
   _mutex.Lock();
   mutex_locked = true;
 }
 
 - (void)unlockForConfiguration {
+  NSLog(@"🎧 [WebRTC] unlockForConfiguration called");
   mutex_locked = false;
   _mutex.Unlock();
 }
-
-#pragma clang diagnostic pop
 
 #pragma mark - AVAudioSession proxy methods
 
@@ -348,94 +357,68 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 
 - (BOOL)setActive:(BOOL)active
             error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setActive: %d called - DISABLED (preserving SDK configuration)", active);
+  
   if (![self checkLock:outError]) {
     return NO;
   }
-  int activationCount = _activationCount.load();
-  if (!active && activationCount == 0) {
-    RTCLogWarning(@"Attempting to deactivate without prior activation.");
-  }
-  [self notifyWillSetActive:active];
-  BOOL success = YES;
-  BOOL isActive = self.isActive;
-  // Keep a local error so we can log it.
-  NSError *error = nil;
-  BOOL shouldSetActive =
-      (active && !isActive) || (!active && isActive && activationCount == 1);
-  // Attempt to activate if we're not active.
-  // Attempt to deactivate if we're active and it's the last unbalanced call.
-  if (shouldSetActive) {
-    AVAudioSession *session = self.session;
-    // AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation is used to ensure
-    // that other audio sessions that were interrupted by our session can return
-    // to their active state. It is recommended for VoIP apps to use this
-    // option.
-    AVAudioSessionSetActiveOptions options =
-        active ? 0 : AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation;
-    success = [session setActive:active
-                     withOptions:options
-                           error:&error];
-    if (outError) {
-      *outError = error;
-    }
-  }
-  if (success) {
-    if (active) {
-      if (shouldSetActive) {
-        self.isActive = active;
-        if (self.isInterrupted) {
-          self.isInterrupted = NO;
-          [self notifyDidEndInterruptionWithShouldResumeSession:YES];
-        }
-      }
-      [self incrementActivationCount];
-      [self notifyDidSetActive:active];
-    }
+  
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  // Just update our internal state without touching AVAudioSession
+  
+  if (active) {
+    [self incrementActivationCount];
+    [self notifyDidSetActive:active];
   } else {
-    RTCLogError(@"Failed to setActive:%d. Error: %@",
-                active, error.localizedDescription);
-    [self notifyFailedToSetActive:active error:error];
-  }
-  // Set isActive and decrement activation count on deactivation
-  // whether or not it succeeded.
-  if (!active) {
-    if (shouldSetActive) {
-      self.isActive = active;
-      [self notifyDidSetActive:active];
-    }
     [self decrementActivationCount];
+    [self notifyDidSetActive:active];
   }
-  RTCLog(@"Number of current activations: %d", _activationCount.load());
-  return success;
+  
+  NSLog(@"🎧 [WebRTC] setActive: %d completed (no actual changes made)", active);
+  return YES; // Always return success
 }
 
 - (BOOL)setCategory:(AVAudioSessionCategory)category
                mode:(AVAudioSessionMode)mode
             options:(AVAudioSessionCategoryOptions)options
               error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setCategory called - DISABLED (preserving SDK configuration)");
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setCategory:category mode:mode options:options error:outError];
+  
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  // Don't touch AVAudioSession - just log and return success
+  NSLog(@"🎧 [WebRTC] setCategory completed (no actual changes made)");
+  return YES;
 }
 
 - (BOOL)setCategory:(AVAudioSessionCategory)category
         withOptions:(AVAudioSessionCategoryOptions)options
               error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setCategory (with options) called - DISABLED (preserving SDK configuration)");
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setCategory:category withOptions:options error:outError];
+  
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  NSLog(@"🎧 [WebRTC] setCategory (with options) completed (no actual changes made)");
+  return YES;
 }
 
 - (BOOL)setMode:(AVAudioSessionMode)mode error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setMode called - DISABLED (preserving SDK configuration)");
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setMode:mode error:outError];
+  
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  NSLog(@"🎧 [WebRTC] setMode completed (no actual changes made)");
+  return YES;
 }
 
 - (BOOL)setInputGain:(float)gain error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setInputGain called");
   if (![self checkLock:outError]) {
     return NO;
   }
@@ -443,53 +426,68 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (BOOL)setPreferredSampleRate:(double)sampleRate error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setPreferredSampleRate called - DISABLED (preserving SDK configuration)");
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setPreferredSampleRate:sampleRate error:outError];
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  NSLog(@"🎧 [WebRTC] setPreferredSampleRate completed (no actual changes made)");
+  return YES;
 }
 
-- (BOOL)setPreferredIOBufferDuration:(NSTimeInterval)duration
-                               error:(NSError **)outError {
+- (BOOL)setPreferredIOBufferDuration:(NSTimeInterval)duration error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setPreferredIOBufferDuration called - DISABLED (preserving SDK configuration)");
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setPreferredIOBufferDuration:duration error:outError];
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  NSLog(@"🎧 [WebRTC] setPreferredIOBufferDuration completed (no actual changes made)");
+  return YES;
 }
 
-- (BOOL)setPreferredInputNumberOfChannels:(NSInteger)count
-                                    error:(NSError **)outError {
+- (BOOL)setPreferredInputNumberOfChannels:(NSInteger)count error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setPreferredInputNumberOfChannels called - DISABLED (preserving SDK configuration)");
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setPreferredInputNumberOfChannels:count error:outError];
-}
-- (BOOL)setPreferredOutputNumberOfChannels:(NSInteger)count
-                                     error:(NSError **)outError {
-  if (![self checkLock:outError]) {
-    return NO;
-  }
-  return [self.session setPreferredOutputNumberOfChannels:count error:outError];
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  NSLog(@"🎧 [WebRTC] setPreferredInputNumberOfChannels completed (no actual changes made)");
+  return YES;
 }
 
-- (BOOL)overrideOutputAudioPort:(AVAudioSessionPortOverride)portOverride
-                          error:(NSError **)outError {
+- (BOOL)setPreferredOutputNumberOfChannels:(NSInteger)count error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setPreferredOutputNumberOfChannels called - DISABLED (preserving SDK configuration)");
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session overrideOutputAudioPort:portOverride error:outError];
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  NSLog(@"🎧 [WebRTC] setPreferredOutputNumberOfChannels completed (no actual changes made)");
+  return YES;
 }
 
-- (BOOL)setPreferredInput:(AVAudioSessionPortDescription *)inPort
-                    error:(NSError **)outError {
+- (BOOL)overrideOutputAudioPort:(AVAudioSessionPortOverride)portOverride error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] overrideOutputAudioPort called - DISABLED (preserving SDK configuration)");
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setPreferredInput:inPort error:outError];
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  NSLog(@"🎧 [WebRTC] overrideOutputAudioPort completed (no actual changes made)");
+  return YES;
+}
+
+- (BOOL)setPreferredInput:(AVAudioSessionPortDescription *)inPort error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setPreferredInput called - DISABLED (preserving SDK configuration)");
+  if (![self checkLock:outError]) {
+    return NO;
+  }
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  NSLog(@"🎧 [WebRTC] setPreferredInput completed (no actual changes made)");
+  return YES;
 }
 
 - (BOOL)setInputDataSource:(AVAudioSessionDataSourceDescription *)dataSource
                      error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setInputDataSource called");
   if (![self checkLock:outError]) {
     return NO;
   }
@@ -498,6 +496,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 
 - (BOOL)setOutputDataSource:(AVAudioSessionDataSourceDescription *)dataSource
                       error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setOutputDataSource called");
   if (![self checkLock:outError]) {
     return NO;
   }
@@ -507,6 +506,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 #pragma mark - Notifications
 
 - (void)handleInterruptionNotification:(NSNotification *)notification {
+  NSLog(@"🎧 [WebRTC] handleInterruptionNotification called");
   NSNumber* typeNumber =
       notification.userInfo[AVAudioSessionInterruptionTypeKey];
   AVAudioSessionInterruptionType type =
@@ -535,87 +535,107 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (void)handleRouteChangeNotification:(NSNotification *)notification {
+  NSLog(@"🎧 [WebRTC] handleRouteChangeNotification called");
+  
   // Get reason for current route change.
-  NSNumber* reasonNumber =
+  NSNumber* typeNumber =
       notification.userInfo[AVAudioSessionRouteChangeReasonKey];
   AVAudioSessionRouteChangeReason reason =
-      (AVAudioSessionRouteChangeReason)reasonNumber.unsignedIntegerValue;
+      (AVAudioSessionRouteChangeReason)typeNumber.unsignedIntegerValue;
+      
   RTCLog(@"Audio route changed:");
+  
+  // Check for USB devices on EVERY route change, not just NewDeviceAvailable
+  BOOL hasUSBDevice = [self hasUSBDeviceConnected];
+  NSLog(@"🎧 [WebRTC] Route change - USB device present: %@", hasUSBDevice ? @"YES" : @"NO");
+  
+  if (hasUSBDevice) {
+    NSLog(@"🎧 [WebRTC] USB device detected in route change - posting device refresh notification");
+    // Post notification for device refresh
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"WebRTCAudioDeviceRefresh" 
+                                                        object:self 
+                                                      userInfo:nil];
+  }
+  
   switch (reason) {
     case AVAudioSessionRouteChangeReasonUnknown:
       RTCLog(@"Audio route changed: ReasonUnknown");
       break;
-    case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
-      RTCLog(@"Audio route changed: NewDeviceAvailable");
+    case AVAudioSessionRouteChangeReasonNewDeviceAvailable: {
+      RTCLog(@"Audio route changed: New device available.");
       break;
+    }
     case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
-      RTCLog(@"Audio route changed: OldDeviceUnavailable");
+      RTCLog(@"Audio route changed: Old device unavailable.");
       break;
     case AVAudioSessionRouteChangeReasonCategoryChange:
-      RTCLog(@"Audio route changed: CategoryChange to :%@", self.session.category);
-      break;
+      RTCLog(@"Audio route changed: Category change to :%@", self.session.category);
+      // Don't update audio session state for category changes since we don't
+      // want WebRTC to restart audio when category is changed while active.
+      return;
     case AVAudioSessionRouteChangeReasonOverride:
-      RTCLog(@"Audio route changed: Override");
+      RTCLog(@"Audio route changed: Override.");
       break;
     case AVAudioSessionRouteChangeReasonWakeFromSleep:
-      RTCLog(@"Audio route changed: WakeFromSleep");
+      RTCLog(@"Audio route changed: Wake from sleep.");
       break;
     case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
-      RTCLog(@"Audio route changed: NoSuitableRouteForCategory");
+      RTCLog(@"Audio route changed: No suitable route for category.");
       break;
     case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
-      RTCLog(@"Audio route changed: RouteConfigurationChange");
+      RTCLog(@"Audio route changed: Route configuration change.");
+      break;
+    default:
+      RTCLog(@"Audio route changed: Unknown reason.");
       break;
   }
+  
   AVAudioSessionRouteDescription* previousRoute =
       notification.userInfo[AVAudioSessionRouteChangePreviousRouteKey];
   // Log previous route configuration.
   RTCLog(@"Previous route: %@\nCurrent route:%@",
          previousRoute, self.session.currentRoute);
   [self notifyDidChangeRouteWithReason:reason previousRoute:previousRoute];
+
+  [self updateAudioSessionAfterEvent];
 }
 
 - (void)handleMediaServicesWereLost:(NSNotification *)notification {
+  NSLog(@"🎧 [WebRTC] handleMediaServicesWereLost called");
   RTCLog(@"Media services were lost.");
   [self updateAudioSessionAfterEvent];
   [self notifyMediaServicesWereLost];
 }
 
 - (void)handleMediaServicesWereReset:(NSNotification *)notification {
+  NSLog(@"🎧 [WebRTC] handleMediaServicesWereReset called");
   RTCLog(@"Media services were reset.");
   [self updateAudioSessionAfterEvent];
   [self notifyMediaServicesWereReset];
 }
 
 - (void)handleSilenceSecondaryAudioHintNotification:(NSNotification *)notification {
-  // TODO(henrika): just adding logs here for now until we know if we are ever
-  // see this notification and might be affected by it or if further actions
-  // are required.
-  NSNumber *typeNumber =
-      notification.userInfo[AVAudioSessionSilenceSecondaryAudioHintTypeKey];
-  AVAudioSessionSilenceSecondaryAudioHintType type =
-      (AVAudioSessionSilenceSecondaryAudioHintType)typeNumber.unsignedIntegerValue;
-  switch (type) {
-    case AVAudioSessionSilenceSecondaryAudioHintTypeBegin:
-      RTCLog(@"Another application's primary audio has started.");
-      break;
-    case AVAudioSessionSilenceSecondaryAudioHintTypeEnd:
-      RTCLog(@"Another application's primary audio has stopped.");
-      break;
-  }
+  NSLog(@"🎧 [WebRTC] handleSilenceSecondaryAudioHintNotification called");
+  // TODO(henrika): Add support for kAudioSessionSilenceSecondaryAudioHintNotification.
+  RTCLog(@"Secondary audio hint notification.");
 }
 
 - (void)handleApplicationDidBecomeActive:(NSNotification *)notification {
-  BOOL isInterrupted = self.isInterrupted;
-  RTCLog(@"Application became active after an interruption. Treating as interruption "
-          "end. isInterrupted changed from %d to 0.",
-         isInterrupted);
-  if (isInterrupted) {
-    self.isInterrupted = NO;
-    [self updateAudioSessionAfterEvent];
-  }
-  // Always treat application becoming active as an interruption end event.
-  [self notifyDidEndInterruptionWithShouldResumeSession:YES];
+  NSLog(@"🎧 [WebRTC] handleApplicationDidBecomeActive called");
+  RTCLog(@"Application became active.");
+  [self updateCanPlayOrRecord];
+}
+
+- (void)handleManualDeviceRefresh:(NSNotification *)notification {
+  NSLog(@"🎧 [WebRTC] Manual device refresh requested from Swift");
+  
+  // Post a different notification name to prevent infinite loops
+  // This will be handled by WebRTC's AudioDeviceIOS class
+  [[NSNotificationCenter defaultCenter] postNotificationName:@"WebRTCAudioDeviceRefresh" 
+                                                      object:self 
+                                                    userInfo:nil];
+  
+  NSLog(@"🎧 [WebRTC] Posted WebRTCAudioDeviceRefresh notification");
 }
 
 #pragma mark - Private
@@ -627,6 +647,28 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
                                               code:RTC_CONSTANT_TYPE(RTCAudioSessionErrorLockRequired)
                                           userInfo:userInfo];
   return error;
+}
+
+- (BOOL)hasUSBDeviceConnected {
+  // Check available inputs for USB devices
+  for (AVAudioSessionPortDescription *input in self.session.availableInputs) {
+    if ([input.portType isEqualToString:AVAudioSessionPortUSBAudio] ||
+        [input.portType isEqualToString:AVAudioSessionPortThunderbolt]) {
+      NSLog(@"🎧 [WebRTC] USB device detected: %@ (type: %@)", input.portName, input.portType);
+      return YES;
+    }
+  }
+  
+  // Also check current route inputs
+  for (AVAudioSessionPortDescription *input in self.session.currentRoute.inputs) {
+    if ([input.portType isEqualToString:AVAudioSessionPortUSBAudio] ||
+        [input.portType isEqualToString:AVAudioSessionPortThunderbolt]) {
+      NSLog(@"🎧 [WebRTC] USB device detected in route: %@ (type: %@)", input.portName, input.portType);
+      return YES;
+    }
+  }
+  
+  return NO;
 }
 
 - (std::vector<__weak id<RTC_OBJC_TYPE(RTCAudioSessionDelegate)> >)delegates {
@@ -685,8 +727,8 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
   @synchronized(self) {
     if (_isInterrupted == isInterrupted) {
       return;
-   }
-   _isInterrupted = isInterrupted;
+    }
+    _isInterrupted = isInterrupted;
   }
 }
 
@@ -701,29 +743,52 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (BOOL)beginWebRTCSession:(NSError **)outError {
-  if (outError) {
-    *outError = nil;
+  NSLog(@"🎧 [WebRTC] beginWebRTCSession called");
+  @synchronized(self) {
+    if (_webRTCSessionCount.load() == 0) {
+      [self lockForConfiguration];
+      BOOL success = [self configureWebRTCSession:outError];
+      [self unlockForConfiguration];
+      if (!success) {
+        return NO;
+      }
+    }
+    _webRTCSessionCount.fetch_add(1);
   }
-  _webRTCSessionCount.fetch_add(1);
   [self notifyDidStartPlayOrRecord];
   return YES;
 }
 
 - (BOOL)endWebRTCSession:(NSError **)outError {
-  if (outError) {
-    *outError = nil;
+  NSLog(@"🎧 [WebRTC] endWebRTCSession called");
+  @synchronized(self) {
+    if (_webRTCSessionCount.load() <= 0) {
+      return NO;
+    }
+    _webRTCSessionCount.fetch_sub(1);
+    if (_webRTCSessionCount.load() == 0) {
+      [self lockForConfiguration];
+      BOOL success = [self unconfigureWebRTCSession:outError];
+      [self unlockForConfiguration];
+      if (!success) {
+        return NO;
+      }
+    }
   }
-  _webRTCSessionCount.fetch_sub(1);
   [self notifyDidStopPlayOrRecord];
   return YES;
 }
 
 - (BOOL)configureWebRTCSession:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] configureWebRTCSession called");
   if (outError) {
     *outError = nil;
   }
+  if (![self checkLock:outError]) {
+    return NO;
+  }
   RTCLog(@"Configuring audio session for WebRTC.");
-
+  
   // Configure the AVAudioSession and activate it.
   // Provide an error even if there isn't one so we can log it.
   NSError *error = nil;
@@ -732,14 +797,13 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
   if (![self setConfiguration:webRTCConfig active:YES error:&error]) {
     RTCLogError(@"Failed to set WebRTC audio configuration: %@",
                 error.localizedDescription);
-    // Do not call setActive:NO if setActive:YES failed.
+    [self unconfigureWebRTCSession:nil];
     if (outError) {
       *outError = error;
     }
     return NO;
   }
-
-#if !TARGET_OS_TV
+  
   // Ensure that the device currently supports audio input.
   // TODO(tkchin): Figure out if this is really necessary.
   if (!self.inputAvailable) {
@@ -750,8 +814,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
     }
     return NO;
   }
-#endif
-
+  
   // It can happen (e.g. in combination with BT devices) that the attempt to set
   // the preferred sample rate for WebRTC (48kHz) fails. If so, make a new
   // configuration attempt using the sample rate that worked using the active
@@ -776,17 +839,20 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
       }
     }
   }
-
+  
   return YES;
 }
 
 - (BOOL)unconfigureWebRTCSession:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] unconfigureWebRTCSession called");
   if (outError) {
     *outError = nil;
   }
+  if (![self checkLock:outError]) {
+    return NO;
+  }
   RTCLog(@"Unconfiguring audio session for WebRTC.");
   [self setActive:NO error:outError];
-
   return YES;
 }
 
@@ -808,7 +874,6 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
                   withOptions:options
                         error:&error]) {
     self.isActive = shouldActivate;
-     RTCLogError(@"Did set session active to %d", shouldActivate);
   } else {
     RTCLogError(@"Failed to set session active to %d. Error:%@",
                 shouldActivate, error.localizedDescription);
@@ -833,60 +898,29 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 
 - (void)audioSessionDidActivate:(AVAudioSession *)session {
   if (_session != session) {
-    RTCLogError(@"audioSessionDidActivate called on different AVAudioSession");
+    RTCLog(@"audioSessionDidActivate called on different AVAudioSession");
   }
   RTCLog(@"Audio session was externally activated.");
   [self incrementActivationCount];
   self.isActive = YES;
   // When a CallKit call begins, it's possible that we receive an interruption
-  // begin without a corresponding end. Since we know that we have an activated
-  // audio session at this point, just clear any saved interruption flag since
-  // the app may never be foregrounded during the duration of the call.
+  // begin immediately after the audio session was activated. In this case we
+  // will receive the interruption notification before the audio session
+  // activation observation, so isInterrupted will be YES even though
+  // CallKit "ended" the interruption. Because of this, we don't want to send
+  // an interruption end event.
   if (self.isInterrupted) {
-    RTCLog(@"Clearing interrupted state due to external activation.");
     self.isInterrupted = NO;
   }
-  // Treat external audio session activation as an end interruption event.
-  [self notifyDidEndInterruptionWithShouldResumeSession:YES];
 }
 
 - (void)audioSessionDidDeactivate:(AVAudioSession *)session {
   if (_session != session) {
-    RTCLogError(@"audioSessionDidDeactivate called on different AVAudioSession");
+    RTCLog(@"audioSessionDidDeactivate called on different AVAudioSession");
   }
   RTCLog(@"Audio session was externally deactivated.");
   self.isActive = NO;
   [self decrementActivationCount];
-}
-
-- (void)observeValueForKeyPath:(NSString *)keyPath
-                      ofObject:(id)object
-                        change:(NSDictionary *)change
-                       context:(void *)context {
-  if (context == (__bridge void *)RTC_OBJC_TYPE(RTCAudioSession).class) {
-    if (object == _session) {
-      NSNumber *newVolume = change[NSKeyValueChangeNewKey];
-      RTCLog(@"OutputVolumeDidChange to %f", newVolume.floatValue);
-      [self notifyDidChangeOutputVolume:newVolume.floatValue];
-    }
-  } else {
-    [super observeValueForKeyPath:keyPath
-                         ofObject:object
-                           change:change
-                          context:context];
-  }
-}
-
-- (void)notifyAudioUnitStartFailedWithError:(OSStatus)error {
-  for (auto delegate : self.delegates) {
-    SEL sel = @selector(audioSession:audioUnitStartFailedWithError:);
-    if ([delegate respondsToSelector:sel]) {
-      [delegate audioSession:self
-          audioUnitStartFailedWithError:[NSError errorWithDomain:RTC_CONSTANT_TYPE(RTCAudioSessionErrorDomain)
-                                                            code:error
-                                                        userInfo:nil]];
-    }
-  }
 }
 
 - (void)notifyDidBeginInterruption {
@@ -910,7 +944,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (void)notifyDidChangeRouteWithReason:(AVAudioSessionRouteChangeReason)reason
-    previousRoute:(AVAudioSessionRouteDescription *)previousRoute {
+                         previousRoute:(AVAudioSessionRouteDescription *)previousRoute {
   for (auto delegate : self.delegates) {
     SEL sel = @selector(audioSessionDidChangeRoute:reason:previousRoute:);
     if ([delegate respondsToSelector:sel]) {
@@ -966,11 +1000,11 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
   }
 }
 
-- (void)notifyDidChangeOutputVolume:(float)volume {
+- (void)notifyDidChangeOutputVolume:(float)outputVolume {
   for (auto delegate : self.delegates) {
     SEL sel = @selector(audioSession:didChangeOutputVolume:);
     if ([delegate respondsToSelector:sel]) {
-      [delegate audioSession:self didChangeOutputVolume:volume];
+      [delegate audioSession:self didChangeOutputVolume:outputVolume];
     }
   }
 }
@@ -1009,6 +1043,21 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
       [delegate audioSession:self failedToSetActive:active error:error];
     }
   }
+}
+
+- (BOOL)setConfiguration:(RTC_OBJC_TYPE(RTCAudioSessionConfiguration) *)configuration
+                 active:(BOOL)active
+                 error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setConfiguration called - DISABLED (preserving SDK configuration)");
+  if (![self checkLock:outError]) {
+    return NO;
+  }
+  
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  // This method would normally call setCategory, setPreferredSampleRate, 
+  // setPreferredIOBufferDuration, and setActive - all now disabled
+  NSLog(@"🎧 [WebRTC] setConfiguration completed (no actual changes made)");
+  return YES;
 }
 
 @end

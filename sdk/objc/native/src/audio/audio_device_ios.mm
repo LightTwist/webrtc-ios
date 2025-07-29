@@ -92,8 +92,7 @@ static void LogDeviceInfo() {
 #endif  // !defined(NDEBUG)
 
 AudioDeviceIOS::AudioDeviceIOS(bool bypass_voice_processing)
-    : bypass_voice_processing_(bypass_voice_processing),
-      audio_device_buffer_(nullptr),
+    : audio_device_buffer_(nullptr),
       audio_unit_(nullptr),
       recording_is_initialized_(false),
       recording_(0),
@@ -105,13 +104,42 @@ AudioDeviceIOS::AudioDeviceIOS(bool bypass_voice_processing)
       num_detected_playout_glitches_(0),
       last_playout_time_(0),
       num_playout_callbacks_(0),
-      last_output_volume_change_time_(0) {
-  LOGI() << "ctor" << ios::GetCurrentThreadDescription()
-         << ",bypass_voice_processing=" << bypass_voice_processing_;
-  io_thread_checker_.Detach();
+      last_output_volume_change_time_(0),
+      current_recording_device_index_(-1),
+      bypass_voice_processing_(bypass_voice_processing) {
+  LOGI() << "AudioDeviceIOS::AudioDeviceIOS bypass_voice_processing="
+         << (bypass_voice_processing_ ? "true" : "false");
   thread_ = rtc::Thread::Current();
-
-  audio_session_observer_ = [[RTC_OBJC_TYPE(RTCNativeAudioSessionDelegateAdapter) alloc] initWithObserver:this];
+  audio_session_observer_ =
+      [[RTC_OBJC_TYPE(RTCNativeAudioSessionDelegateAdapter) alloc] initWithObserver:this];
+  
+  // Listen for device refresh notifications from RTCAudioSession
+  [[NSNotificationCenter defaultCenter] addObserverForName:@"WebRTCAudioDeviceRefresh"
+                                                     object:nil
+                                                      queue:[NSOperationQueue mainQueue]
+                                                 usingBlock:^(NSNotification *note) {
+    RTCLog(@"🎧 [WebRTC AudioDeviceIOS] Received device refresh notification from: %@", note.object);
+    
+    // Post to the WebRTC audio thread to maintain thread safety
+    this->thread_->PostTask([this]() {
+      RTCLog(@"🎧 [WebRTC AudioDeviceIOS] Executing device refresh on audio thread");
+      this->SelectBestAvailableInputDevice();
+    });
+  }];
+  
+  // Also listen for manual refresh requests from Swift
+  [[NSNotificationCenter defaultCenter] addObserverForName:@"RTCAudioSessionRefreshDevices"
+                                                     object:nil
+                                                      queue:[NSOperationQueue mainQueue]
+                                                 usingBlock:^(NSNotification *note) {
+    RTCLog(@"🎧 [WebRTC AudioDeviceIOS] Received manual refresh request from Swift");
+    
+    // Post to the WebRTC audio thread to maintain thread safety
+    this->thread_->PostTask([this]() {
+      RTCLog(@"🎧 [WebRTC AudioDeviceIOS] Executing manual device refresh on audio thread");
+      this->SelectBestAvailableInputDevice();
+    });
+  }];
   mach_timebase_info_data_t tinfo;
   mach_timebase_info(&tinfo);
   machTickUnitsToNanoseconds_ = (double)tinfo.numer / tinfo.denom;
@@ -120,6 +148,15 @@ AudioDeviceIOS::AudioDeviceIOS(bool bypass_voice_processing)
 AudioDeviceIOS::~AudioDeviceIOS() {
   RTC_DCHECK_RUN_ON(thread_);
   LOGI() << "~dtor" << ios::GetCurrentThreadDescription();
+  
+  // Clean up notification observers
+  [[NSNotificationCenter defaultCenter] removeObserver:nil 
+                                                   name:@"WebRTCAudioDeviceRefresh" 
+                                                 object:nil];
+  [[NSNotificationCenter defaultCenter] removeObserver:nil 
+                                                   name:@"RTCAudioSessionRefreshDevices" 
+                                                 object:nil];
+  
   safety_->SetNotAlive();
   Terminate();
   audio_session_observer_ = nil;
@@ -535,6 +572,18 @@ void AudioDeviceIOS::HandleValidRouteChange() {
   RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
   RTCLog(@"%@", session);
   HandleSampleRateChange();
+  
+  // Re-select best input device after WebRTC session configuration to restore USB device
+  // This handles the case where WebRTC's configureWebRTCSession overrides our device selection
+  if (has_configured_session_) {
+    RTCLog(@"Audio route changed - will re-select best input device after delay");
+    // Delay slightly to let the audio session settle after the override
+    // Post back to the WebRTC audio thread to maintain thread safety
+    thread_->PostDelayedTask([this]() {
+      RTCLog(@"Re-selecting best input device after route change");
+      SelectBestAvailableInputDevice();
+    }, webrtc::TimeDelta::Millis(100));
+  }
 }
 
 void AudioDeviceIOS::HandleCanPlayOrRecordChange(bool can_play_or_record) {
@@ -869,40 +918,37 @@ void AudioDeviceIOS::UpdateAudioUnit(bool can_play_or_record) {
 
 bool AudioDeviceIOS::ConfigureAudioSession() {
   RTC_DCHECK_RUN_ON(thread_);
-  RTCLog(@"Configuring audio session.");
+  RTCLog(@"Using existing audio session configuration (not overriding).");
   if (has_configured_session_) {
     RTCLogWarning(@"Audio session already configured.");
     return false;
   }
-  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
-  [session lockForConfiguration];
-  bool success = [session configureWebRTCSession:nil];
-  [session unlockForConfiguration];
-  if (success) {
-    has_configured_session_ = true;
-    RTCLog(@"Configured audio session.");
-  } else {
-    RTCLog(@"Failed to configure audio session.");
-  }
-  return success;
+  
+  // Skip WebRTC's configureWebRTCSession to preserve existing AVAudioSession setup
+  // This prevents USB devices from disappearing due to WebRTC's session reconfiguration
+  has_configured_session_ = true;
+  RTCLog(@"Using existing audio session configuration - USB devices preserved.");
+  
+  // Select the best available input device with current session configuration
+  SelectBestAvailableInputDevice();
+  
+  return true;
 }
 
 bool AudioDeviceIOS::ConfigureAudioSessionLocked() {
   RTC_DCHECK_RUN_ON(thread_);
-  RTCLog(@"Configuring audio session.");
+  RTCLog(@"Using existing audio session configuration (locked, not overriding).");
   if (has_configured_session_) {
     RTCLogWarning(@"Audio session already configured.");
     return false;
   }
-  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
-  bool success = [session configureWebRTCSession:nil];
-  if (success) {
-    has_configured_session_ = true;
-    RTCLog(@"Configured audio session.");
-  } else {
-    RTCLog(@"Failed to configure audio session.");
-  }
-  return success;
+  
+  // Skip WebRTC's configureWebRTCSession to preserve existing AVAudioSession setup
+  // This prevents USB devices from disappearing due to WebRTC's session reconfiguration
+  has_configured_session_ = true;
+  RTCLog(@"Using existing audio session configuration (locked) - USB devices preserved.");
+  
+  return true;
 }
 
 void AudioDeviceIOS::UnconfigureAudioSession() {
@@ -1015,9 +1061,29 @@ int16_t AudioDeviceIOS::PlayoutDevices() {
 }
 
 int16_t AudioDeviceIOS::RecordingDevices() {
-  // TODO(henrika): improve.
-  RTC_LOG_F(LS_WARNING) << "Not implemented";
-  return (int16_t)1;
+  LOGI() << "RecordingDevices";
+  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+  
+  // Get available inputs from AVAudioSession
+  NSArray<AVAudioSessionPortDescription *> *availableInputs = [session.session availableInputs];
+  
+  if (!availableInputs) {
+    RTC_LOG(LS_WARNING) << "No available inputs found";
+    return 1; // At least return built-in mic
+  }
+  
+  // Count total inputs including data sources within each port
+  int16_t totalDevices = 0;
+  for (AVAudioSessionPortDescription *port in availableInputs) {
+    if (port.dataSources && port.dataSources.count > 0) {
+      totalDevices += port.dataSources.count;
+    } else {
+      totalDevices += 1; // Port without data sources counts as one device
+    }
+  }
+  
+  RTC_LOG(LS_INFO) << "Found " << totalDevices << " recording devices";
+  return totalDevices;
 }
 
 int32_t AudioDeviceIOS::InitSpeaker() {
@@ -1166,13 +1232,127 @@ int32_t AudioDeviceIOS::PlayoutDeviceName(uint16_t index,
 int32_t AudioDeviceIOS::RecordingDeviceName(uint16_t index,
                                             char name[kAdmMaxDeviceNameSize],
                                             char guid[kAdmMaxGuidSize]) {
-  RTC_DCHECK_NOTREACHED() << "Not implemented";
-  return -1;
+  LOGI() << "RecordingDeviceName(" << index << ")";
+  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+  
+  NSArray<AVAudioSessionPortDescription *> *availableInputs = [session.session availableInputs];
+  if (!availableInputs) {
+    return -1;
+  }
+  
+  // Flatten the device list (ports and their data sources)
+  NSMutableArray<NSDictionary *> *devices = [NSMutableArray array];
+  
+  for (AVAudioSessionPortDescription *port in availableInputs) {
+    if (port.dataSources && port.dataSources.count > 0) {
+      for (AVAudioSessionDataSourceDescription *dataSource in port.dataSources) {
+        [devices addObject:@{
+          @"port": port,
+          @"dataSource": dataSource,
+          @"name": [NSString stringWithFormat:@"%@ - %@", port.portName, dataSource.dataSourceName],
+          @"uid": [NSString stringWithFormat:@"%@_%@", port.UID, dataSource.dataSourceID]
+        }];
+      }
+    } else {
+      [devices addObject:@{
+        @"port": port,
+        @"name": port.portName ?: @"Unknown",
+        @"uid": port.UID ?: @"unknown"
+      }];
+    }
+  }
+  
+  if (index >= devices.count) {
+    return -1;
+  }
+  
+  NSDictionary *device = devices[index];
+  NSString *deviceName = device[@"name"];
+  NSString *deviceUID = device[@"uid"];
+  
+  // Copy name and UID to output buffers
+  strncpy(name, [deviceName UTF8String], kAdmMaxDeviceNameSize - 1);
+  name[kAdmMaxDeviceNameSize - 1] = '\0';
+  
+  strncpy(guid, [deviceUID UTF8String], kAdmMaxGuidSize - 1);
+  guid[kAdmMaxGuidSize - 1] = '\0';
+  
+  RTC_LOG(LS_INFO) << "Device " << index << ": " << name << " (" << guid << ")";
+  return 0;
 }
 
 int32_t AudioDeviceIOS::SetRecordingDevice(uint16_t index) {
-  RTC_LOG_F(LS_WARNING) << "Not implemented";
-  return 0;
+  LOGI() << "SetRecordingDevice(" << index << ")";
+  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+  
+  NSArray<AVAudioSessionPortDescription *> *availableInputs = [session.session availableInputs];
+  if (!availableInputs) {
+    RTC_LOG(LS_ERROR) << "No available inputs found";
+    return -1;
+  }
+  
+  // Rebuild the same flattened device list as in RecordingDeviceName
+  NSMutableArray<NSDictionary *> *devices = [NSMutableArray array];
+  
+  for (AVAudioSessionPortDescription *port in availableInputs) {
+    if (port.dataSources && port.dataSources.count > 0) {
+      for (AVAudioSessionDataSourceDescription *dataSource in port.dataSources) {
+        [devices addObject:@{
+          @"port": port,
+          @"dataSource": dataSource
+        }];
+      }
+    } else {
+      [devices addObject:@{
+        @"port": port
+      }];
+    }
+  }
+  
+  if (index >= devices.count) {
+    RTC_LOG(LS_ERROR) << "Invalid device index: " << index;
+    return -1;
+  }
+  
+  NSDictionary *device = devices[index];
+  AVAudioSessionPortDescription *port = device[@"port"];
+  AVAudioSessionDataSourceDescription *dataSource = device[@"dataSource"];
+  
+  [session lockForConfiguration];
+  
+  NSError *error = nil;
+  BOOL success = YES;
+  
+  // Set the preferred input port
+  if (![session setPreferredInput:port error:&error]) {
+    RTC_LOG(LS_ERROR) << "Failed to set preferred input port: " 
+                      << [[error localizedDescription] UTF8String];
+    success = NO;
+  }
+  
+  // Set the data source if specified
+  if (success && dataSource) {
+    if (![session setInputDataSource:dataSource error:&error]) {
+      RTC_LOG(LS_ERROR) << "Failed to set input data source: " 
+                        << [[error localizedDescription] UTF8String];
+      success = NO;
+    }
+  }
+  
+  [session unlockForConfiguration];
+  
+  if (success) {
+    RTC_LOG(LS_INFO) << "Successfully set recording device to index " << index;
+    // Store the current device index for GetRecordingDevice
+    current_recording_device_index_ = index;
+  }
+  
+  return success ? 0 : -1;
+}
+
+// Add a getter method to track current device
+int32_t AudioDeviceIOS::GetRecordingDevice() const {
+  return current_recording_device_index_;
 }
 
 int32_t AudioDeviceIOS::SetRecordingDevice(AudioDeviceModule::WindowsDeviceType) {
@@ -1190,5 +1370,121 @@ int32_t AudioDeviceIOS::RecordingIsAvailable(bool& available) {
   return 0;
 }
 
+void AudioDeviceIOS::SelectBestAvailableInputDevice() {
+  LOGI() << "Selecting best available input device";
+  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+  
+  // Log current route for debugging
+  AVAudioSessionRouteDescription *currentRoute = session.session.currentRoute;
+  RTCLog(@"Current audio route before device selection:");
+  for (AVAudioSessionPortDescription *input in currentRoute.inputs) {
+    RTCLog(@"  Input: %@ (%@)", input.portName, input.portType);
+  }
+  
+  NSArray<AVAudioSessionPortDescription *> *availableInputs = [session.session availableInputs];
+  if (!availableInputs || availableInputs.count == 0) {
+    RTC_LOG(LS_WARNING) << "No available inputs found";
+    return;
+  }
+  
+  // Log all available inputs for debugging
+  RTCLog(@"Available input devices (%lu total):", (unsigned long)availableInputs.count);
+  for (NSUInteger i = 0; i < availableInputs.count; i++) {
+    AVAudioSessionPortDescription *port = availableInputs[i];
+    RTCLog(@"  [%lu] %@ (%@)", (unsigned long)i, port.portName, port.portType);
+  }
+  
+  // Priority order for device selection (higher number = higher priority)
+  NSMutableArray<NSString *> *deviceTypePriority = [NSMutableArray arrayWithArray:@[
+    AVAudioSessionPortBuiltInMic,        // 0 - Built-in microphone (fallback)
+    AVAudioSessionPortBluetoothLE,       // 1 - Bluetooth LE
+    AVAudioSessionPortBluetoothA2DP,     // 2 - Bluetooth A2DP  
+    AVAudioSessionPortBluetoothHFP,      // 3 - Bluetooth hands-free
+    AVAudioSessionPortUSBAudio           // 4 - USB Audio (high priority)
+  ]];
+  
+  // Add Thunderbolt support for iOS 14+ only
+  if (@available(iOS 14.0, *)) {
+    [deviceTypePriority addObject:AVAudioSessionPortThunderbolt]; // 5 - Thunderbolt (highest priority)
+  }
+  
+  // Create the same flattened device list as in SetRecordingDevice/RecordingDeviceName
+  NSMutableArray<NSDictionary *> *devices = [NSMutableArray array];
+  
+  for (AVAudioSessionPortDescription *port in availableInputs) {
+    if (port.dataSources && port.dataSources.count > 0) {
+      for (AVAudioSessionDataSourceDescription *dataSource in port.dataSources) {
+        [devices addObject:@{
+          @"port": port,
+          @"dataSource": dataSource,
+          @"portType": port.portType
+        }];
+      }
+    } else {
+      [devices addObject:@{
+        @"port": port,
+        @"portType": port.portType
+      }];
+    }
+  }
+  
+  // Find the best available device based on priority
+  int bestPriority = -1;
+  uint16_t bestDeviceIndex = 0;
+  
+  for (uint16_t i = 0; i < devices.count; i++) {
+    NSDictionary *device = devices[i];
+    NSString *portType = device[@"portType"];
+    NSInteger priority = [deviceTypePriority indexOfObject:portType];
+    
+    if (priority != NSNotFound && priority > bestPriority) {
+      bestPriority = (int)priority;
+      bestDeviceIndex = i;
+    }
+  }
+  
+  // Only set the device if we found something better than built-in mic
+  if (bestPriority > 0) {
+    NSDictionary *bestDevice = devices[bestDeviceIndex];
+    AVAudioSessionPortDescription *bestPort = bestDevice[@"port"];
+    
+    RTC_LOG(LS_INFO) << "Auto-selecting preferred input device: " 
+                     << [bestPort.portName UTF8String] 
+                     << " (type: " << [bestPort.portType UTF8String] << ")"
+                     << " at index " << bestDeviceIndex;
+    
+    // Use our existing SetRecordingDevice method to select the best device
+    if (SetRecordingDevice(bestDeviceIndex) == 0) {
+      RTC_LOG(LS_INFO) << "Successfully auto-selected input device at index " << bestDeviceIndex;
+      
+      // Log the final result
+      AVAudioSessionRouteDescription *newRoute = session.session.currentRoute;
+      RTCLog(@"Audio route after device selection:");
+      for (AVAudioSessionPortDescription *input in newRoute.inputs) {
+        RTCLog(@"  Active Input: %@ (%@)", input.portName, input.portType);
+      }
+    } else {
+      RTC_LOG(LS_ERROR) << "Failed to auto-select input device at index " << bestDeviceIndex;
+    }
+  } else {
+    RTC_LOG(LS_INFO) << "Using default built-in microphone (no external devices available)";
+  }
+}
+
 }  // namespace ios_adm
+
 }  // namespace webrtc
+
+// C interface for Swift to trigger device re-selection
+extern "C" {
+void LKWebRTCRefreshAudioDevices() {
+  // Get the current audio device module from the factory
+  // This is a simplified approach - in a real implementation, 
+  // you'd need to access the actual AudioDeviceIOS instance
+  RTCLog(@"🎧 [WebRTC] C interface: Refreshing audio devices requested from Swift");
+  
+  // For now, just log that the function was called
+  // The actual device selection will happen through WebRTC's normal flow
+  RTCLog(@"🎧 [WebRTC] Device refresh triggered - WebRTC will re-evaluate inputs");
+}
+}

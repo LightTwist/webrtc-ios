@@ -39,139 +39,17 @@
                   active:(BOOL)active
          shouldSetActive:(BOOL)shouldSetActive
                    error:(NSError **)outError {
+  NSLog(@"🎧 [WebRTC] setConfiguration (Configuration category) called - DISABLED (preserving SDK configuration)");
   NSParameterAssert(configuration);
   if (outError) {
     *outError = nil;
   }
 
-  // Provide an error even if there isn't one so we can log it. We will not
-  // return immediately on error in this function and instead try to set
-  // everything we can.
-  NSError *error = nil;
-
-  if (self.category != configuration.category || self.mode != configuration.mode ||
-      self.categoryOptions != configuration.categoryOptions) {
-    NSError *configuringError = nil;
-    if (![self setCategory:configuration.category
-                      mode:configuration.mode
-                   options:configuration.categoryOptions
-                     error:&configuringError]) {
-      RTCLogError(@"Failed to set category and mode: %@", configuringError.localizedDescription);
-      error = configuringError;
-    } else {
-      RTCLog(@"Set category to: %@, mode: %@", configuration.category, configuration.mode);
-    }
-  }
-
-  if (self.mode != configuration.mode) {
-    NSError *modeError = nil;
-    if (![self setMode:configuration.mode error:&modeError]) {
-      RTCLogError(@"Failed to set mode to %@: %@",
-                  self.mode,
-                  modeError.localizedDescription);
-      error = modeError;
-    } else {
-      RTCLog(@"Set mode to: %@", configuration.mode);
-    }
-  }
-
-  // Sometimes category options don't stick after setting mode.
-  if (self.categoryOptions != configuration.categoryOptions) {
-    NSError *categoryError = nil;
-    if (![self setCategory:configuration.category
-               withOptions:configuration.categoryOptions
-                     error:&categoryError]) {
-      RTCLogError(@"Failed to set category options: %@",
-                  categoryError.localizedDescription);
-      error = categoryError;
-    } else {
-      RTCLog(@"Set category options to: %ld",
-             (long)configuration.categoryOptions);
-    }
-  }
-
-  if (self.preferredSampleRate != configuration.sampleRate) {
-    NSError *sampleRateError = nil;
-    if (![self setPreferredSampleRate:configuration.sampleRate
-                                error:&sampleRateError]) {
-      RTCLogError(@"Failed to set preferred sample rate: %@",
-                  sampleRateError.localizedDescription);
-      if (!self.ignoresPreferredAttributeConfigurationErrors) {
-        error = sampleRateError;
-      }
-    } else {
-      RTCLog(@"Set preferred sample rate to: %.2f",
-             configuration.sampleRate);
-    }
-  }
-
-  if (self.preferredIOBufferDuration != configuration.ioBufferDuration) {
-    NSError *bufferDurationError = nil;
-    if (![self setPreferredIOBufferDuration:configuration.ioBufferDuration
-                                      error:&bufferDurationError]) {
-      RTCLogError(@"Failed to set preferred IO buffer duration: %@",
-                  bufferDurationError.localizedDescription);
-      if (!self.ignoresPreferredAttributeConfigurationErrors) {
-        error = bufferDurationError;
-      }
-    } else {
-      RTCLog(@"Set preferred IO buffer duration to: %f",
-             configuration.ioBufferDuration);
-    }
-  }
-
-  if (shouldSetActive) {
-    NSError *activeError = nil;
-    if (![self setActive:active error:&activeError]) {
-      RTCLogError(@"Failed to setActive to %d: %@",
-                  active, activeError.localizedDescription);
-      error = activeError;
-    }
-  }
-
-  if (self.isActive &&
-      // TODO(tkchin): Figure out which category/mode numChannels is valid for.
-      [self.mode isEqualToString:AVAudioSessionModeVoiceChat]) {
-    // Try to set the preferred number of hardware audio channels. These calls
-    // must be done after setting the audio session’s category and mode and
-    // activating the session.
-    NSInteger inputNumberOfChannels = configuration.inputNumberOfChannels;
-    if (self.inputNumberOfChannels != inputNumberOfChannels) {
-      NSError *inputChannelsError = nil;
-      if (![self setPreferredInputNumberOfChannels:inputNumberOfChannels
-                                             error:&inputChannelsError]) {
-       RTCLogError(@"Failed to set preferred input number of channels: %@",
-                   inputChannelsError.localizedDescription);
-       if (!self.ignoresPreferredAttributeConfigurationErrors) {
-         error = inputChannelsError;
-       }
-      } else {
-        RTCLog(@"Set input number of channels to: %ld",
-               (long)inputNumberOfChannels);
-      }
-    }
-    NSInteger outputNumberOfChannels = configuration.outputNumberOfChannels;
-    if (self.outputNumberOfChannels != outputNumberOfChannels) {
-      NSError *outputChannelsError = nil;
-      if (![self setPreferredOutputNumberOfChannels:outputNumberOfChannels
-                                              error:&outputChannelsError]) {
-        RTCLogError(@"Failed to set preferred output number of channels: %@",
-                    outputChannelsError.localizedDescription);
-        if (!self.ignoresPreferredAttributeConfigurationErrors) {
-          error = outputChannelsError;
-        }
-      } else {
-        RTCLog(@"Set output number of channels to: %ld",
-               (long)outputNumberOfChannels);
-      }
-    }
-  }
-
-  if (outError) {
-    *outError = error;
-  }
-
-  return error == nil;
+  // COMPLETELY DISABLED: Let SDK handle all audio session management
+  // This method would normally call setCategory, setMode, setPreferredSampleRate, 
+  // setPreferredIOBufferDuration, setActive, and channel configuration - all now disabled
+  NSLog(@"🎧 [WebRTC] setConfiguration (Configuration category) completed (no actual changes made)");
+  return YES;
 }
 
 @end

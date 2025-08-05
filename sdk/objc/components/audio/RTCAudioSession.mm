@@ -72,7 +72,15 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 }
 
 - (instancetype)init {
-  return [self initWithAudioSession:[AVAudioSession sharedInstance]];
+  NSLog(@"🎧 [WebRTC] init called");
+  LKRTCAudioSession* rtcAudioSession = [self initWithAudioSession:[AVAudioSession sharedInstance]];
+
+  NSLog(@"🎧 [WebRTC] Available inputs:");
+  for (AVAudioSessionPortDescription *input in rtcAudioSession.session.availableInputs) {
+    NSLog(@"🎧 [WebRTC] Input name: %@", input.portName);
+  }
+
+  return rtcAudioSession;
 }
 
 /** This initializer provides a way for unit tests to inject a fake/mock audio session. */

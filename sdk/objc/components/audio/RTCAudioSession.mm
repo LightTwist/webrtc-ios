@@ -365,6 +365,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 - (BOOL)setActive:(BOOL)active
             error:(NSError **)outError {
   NSLog(@"🎧 [WebRTC] setActive: %d called - DISABLED (preserving SDK configuration)", active);
+  NSLog(@"🎧 [WebRTC] Call stack:\n%@", [NSThread callStackSymbols]);
   
   if (![self checkLock:outError]) {
     return NO;

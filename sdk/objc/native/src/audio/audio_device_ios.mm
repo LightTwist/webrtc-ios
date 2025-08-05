@@ -1065,7 +1065,7 @@ int16_t AudioDeviceIOS::RecordingDevices() {
   RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
   
   // Get available inputs from AVAudioSession
-  NSArray<AVAudioSessionPortDescription *> *availableInputs = [session.session availableInputs];
+  NSArray<AVAudioSessionPortDescription *> *availableInputs = [session.session availableInputs]; //note: session.session is a AVSession
   
   if (!availableInputs) {
     RTC_LOG(LS_WARNING) << "No available inputs found";

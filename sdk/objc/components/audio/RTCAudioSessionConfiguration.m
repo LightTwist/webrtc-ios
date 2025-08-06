@@ -62,9 +62,11 @@ static RTC_OBJC_TYPE(RTCAudioSessionConfiguration) *gWebRTCConfiguration = nil;
     // audio sessions which are also nonmixable.
     _category = session.category;
     _categoryOptions = session.categoryOptions;
+    
 
     // Specify mode for two-way voice communication (e.g. VoIP).
     _mode = session.mode;
+    NSLog(@"VIKAS Audio Session Category: %@, Category Options: %lu, Mode: %@", _category, (unsigned long)_categoryOptions, _mode);
 
     // Use best sample rate and buffer duration if the CPU has more than one
     // core.

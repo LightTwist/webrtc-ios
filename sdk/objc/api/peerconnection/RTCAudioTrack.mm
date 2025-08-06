@@ -37,6 +37,8 @@
   RTC_DCHECK(trackId.length);
 
   std::string nativeId = [NSString stdStringForString:trackId];
+
+  NSLog(@"VIKAS initWithFactory");
   rtc::scoped_refptr<webrtc::AudioTrackInterface> track =
       factory.nativeFactory->CreateAudioTrack(nativeId, source.nativeAudioSource.get());
   if (self = [self initWithFactory:factory nativeTrack:track type:RTC_OBJC_TYPE(RTCMediaStreamTrackTypeAudio)]) {

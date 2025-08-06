@@ -75,7 +75,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
   NSLog(@"🎧 [WebRTC] init called");
   LKRTCAudioSession* rtcAudioSession = [self initWithAudioSession:[AVAudioSession sharedInstance]];
 
-  NSLog(@"🎧 [WebRTC] Available inputs:");
+  NSLog(@"🎧 [WebRTC] Blah Available inputs:");
   for (AVAudioSessionPortDescription *input in rtcAudioSession.session.availableInputs) {
     NSLog(@"🎧 [WebRTC] Input name: %@", input.portName);
   }
@@ -356,6 +356,7 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 
 - (BOOL)setActive:(BOOL)active
             error:(NSError **)outError {
+  NSLog(@"VIKAS 🎯 setActive called: %@", active ? @"YES" : @"NO");
   if (![self checkLock:outError]) {
     return NO;
   }
@@ -430,10 +431,13 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 - (BOOL)setCategory:(AVAudioSessionCategory)category
         withOptions:(AVAudioSessionCategoryOptions)options
               error:(NSError **)outError {
+  NSLog(@"VIKAS 🎯 setCategory called: %@ options: %lu", category, (unsigned long)options);
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setCategory:category withOptions:options error:outError];
+  BOOL result = [self.session setCategory:category withOptions:options error:outError];
+  NSLog(@"VIKAS 🎯 setCategory result: %@", result ? @"SUCCESS" : @"FAILED");
+  return result;
 }
 
 - (BOOL)setMode:(AVAudioSessionMode)mode error:(NSError **)outError {
@@ -490,10 +494,14 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
 
 - (BOOL)setPreferredInput:(AVAudioSessionPortDescription *)inPort
                     error:(NSError **)outError {
+
+  NSLog(@"VIKAS 🎯 setPreferredInput called: %@ (type: %@)", inPort.portName, inPort.portType);
   if (![self checkLock:outError]) {
     return NO;
   }
-  return [self.session setPreferredInput:inPort error:outError];
+  BOOL result = [self.session setPreferredInput:inPort error:outError];
+  NSLog(@"VIKAS 🎯 setPreferredInput result: %@, error: %@", result ? @"SUCCESS" : @"FAILED", *outError);
+  return result;
 }
 
 - (BOOL)setInputDataSource:(AVAudioSessionDataSourceDescription *)dataSource
@@ -548,6 +556,59 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
       notification.userInfo[AVAudioSessionRouteChangeReasonKey];
   AVAudioSessionRouteChangeReason reason =
       (AVAudioSessionRouteChangeReason)reasonNumber.unsignedIntegerValue;
+  
+  NSString* reasonString = @"Unknown";
+  switch (reason) {
+    case AVAudioSessionRouteChangeReasonUnknown:
+      reasonString = @"Unknown";
+      break;
+    case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
+      reasonString = @"NewDeviceAvailable";
+      break;
+    case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
+      reasonString = @"OldDeviceUnavailable";
+      break;
+    case AVAudioSessionRouteChangeReasonCategoryChange:
+      reasonString = @"CategoryChange";
+      break;
+    case AVAudioSessionRouteChangeReasonOverride:
+      reasonString = @"Override";
+      break;
+    case AVAudioSessionRouteChangeReasonWakeFromSleep:
+      reasonString = @"WakeFromSleep";
+      break;
+    case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
+      reasonString = @"NoSuitableRouteForCategory";
+      break;
+    case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
+      reasonString = @"RouteConfigurationChange";
+      break;
+  }
+  
+  // Rate limit logging to avoid spam
+  static NSTimeInterval lastLogTime = 0;
+  NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
+  if (currentTime - lastLogTime > 2.0) { // Log every 2 seconds max
+    NSLog(@"VIKAS 🔄 ROUTE CHANGE: %@ (reason: %@)", reasonString, @(reason));
+    
+    // Log current route after change
+    if (self.currentRoute.inputs.count > 0) {
+      AVAudioSessionPortDescription* currentInput = self.currentRoute.inputs.firstObject;
+      NSLog(@"VIKAS 🔄 New input route: %@ (type: %@)", currentInput.portName, currentInput.portType);
+    } else {
+      NSLog(@"VIKAS 🔄 No input route after change");
+    }
+    
+    // Log available inputs to see if USB mic is still available
+    NSArray<AVAudioSessionPortDescription*>* availableInputs = self.session.availableInputs;
+    NSLog(@"VIKAS 🔄 Available inputs after route change (%lu total):", (unsigned long)availableInputs.count);
+    for (AVAudioSessionPortDescription* input in availableInputs) {
+      NSLog(@"VIKAS 🔄    %@ (type: %@)", input.portName, input.portType);
+    }
+    
+    lastLogTime = currentTime;
+  }
+  
   RTCLog(@"Audio route changed:");
   switch (reason) {
     case AVAudioSessionRouteChangeReasonUnknown:
@@ -735,6 +796,22 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
   // Configure the AVAudioSession and activate it.
   // Provide an error even if there isn't one so we can log it.
   NSError *error = nil;
+  
+  // Log available inputs BEFORE configuration
+  NSArray<AVAudioSessionPortDescription*>* availableInputs = self.session.availableInputs;
+  NSLog(@"VIKAS 🎯 BEFORE setConfiguration - Available inputs (%lu total):", (unsigned long)availableInputs.count);
+  for (AVAudioSessionPortDescription* input in availableInputs) {
+    NSLog(@"VIKAS 🎯    %@ (type: %@)", input.portName, input.portType);
+  }
+  
+  if (self.currentRoute.inputs.count > 0) {
+    AVAudioSessionPortDescription* currentInput = self.currentRoute.inputs.firstObject;
+    NSLog(@"VIKAS 🎯 BEFORE setConfiguration - Current input: %@ (type: %@)", 
+          currentInput.portName, currentInput.portType);
+  } else {
+    NSLog(@"VIKAS 🎯 BEFORE setConfiguration - No current input route");
+  }
+  
   RTC_OBJC_TYPE(RTCAudioSessionConfiguration) *webRTCConfig =
       [RTC_OBJC_TYPE(RTCAudioSessionConfiguration) webRTCConfiguration];
   if (![self setConfiguration:webRTCConfig active:YES error:&error]) {
@@ -745,6 +822,21 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
       *outError = error;
     }
     return NO;
+  }
+  
+  // Log available inputs AFTER configuration
+  availableInputs = self.session.availableInputs;
+  NSLog(@"VIKAS 🎯 AFTER setConfiguration - Available inputs (%lu total):", (unsigned long)availableInputs.count);
+  for (AVAudioSessionPortDescription* input in availableInputs) {
+    NSLog(@"VIKAS 🎯    %@ (type: %@)", input.portName, input.portType);
+  }
+  
+  if (self.currentRoute.inputs.count > 0) {
+    AVAudioSessionPortDescription* currentInput = self.currentRoute.inputs.firstObject;
+    NSLog(@"VIKAS 🎯 AFTER setConfiguration - Current input: %@ (type: %@)", 
+          currentInput.portName, currentInput.portType);
+  } else {
+    NSLog(@"VIKAS 🎯 AFTER setConfiguration - No current input route");
   }
 
 #if !TARGET_OS_TV

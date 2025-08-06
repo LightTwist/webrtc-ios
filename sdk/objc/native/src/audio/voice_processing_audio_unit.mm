@@ -15,6 +15,7 @@
 
 #import "base/RTCLogging.h"
 #import "sdk/objc/components/audio/RTCAudioSessionConfiguration.h"
+#import "sdk/objc/components/audio/RTCAudioSession.h"
 
 #if !defined(NDEBUG)
 static void LogStreamDescription(AudioStreamBasicDescription description) {
@@ -77,6 +78,7 @@ VoiceProcessingAudioUnit::VoiceProcessingAudioUnit(bool bypass_voice_processing,
       observer_(observer),
       vpio_unit_(nullptr),
       state_(kInitRequired) {
+  NSLog(@"VIKAS 🚀 VoiceProcessingAudioUnit CONSTRUCTOR called, bypass_voice_processing=%d", bypass_voice_processing);
   RTC_DCHECK(observer);
 }
 
@@ -87,7 +89,26 @@ VoiceProcessingAudioUnit::~VoiceProcessingAudioUnit() {
 const UInt32 VoiceProcessingAudioUnit::kBytesPerSample = 2;
 
 bool VoiceProcessingAudioUnit::Init() {
+
   RTC_DCHECK_EQ(state_, kInitRequired);
+
+  // Log current audio session input device
+  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+  if (session.currentRoute.inputs.count > 0) {
+    AVAudioSessionPortDescription* currentInput = session.currentRoute.inputs.firstObject;
+    NSLog(@"VIKAS 🎤 VoiceProcessingAudioUnit::Init - Current input device: %@ (type: %@)", 
+           currentInput.portName, currentInput.portType);
+    
+    // Log all available inputs for context
+    NSArray<AVAudioSessionPortDescription*>* availableInputs = session.session.availableInputs;
+    NSLog(@"VIKAS 🎤 Available inputs (%lu total):", (unsigned long)availableInputs.count);
+    for (AVAudioSessionPortDescription* input in availableInputs) {
+      NSString* marker = [input isEqual:currentInput] ? @"✅ ACTIVE" : @"  ";
+      NSLog(@"VIKAS 🎤 %@ %@ (type: %@)", marker, input.portName, input.portType);
+    }
+  } else {
+    NSLog(@"VIKAS 🎤 VoiceProcessingAudioUnit::Init - No input devices found in current route");
+  }
 
   // Create an audio component description to identify the Voice Processing
   // I/O audio unit.
@@ -193,6 +214,21 @@ bool VoiceProcessingAudioUnit::Initialize(Float64 sample_rate, bool enable_input
 
   UInt32 _enable_input = enable_input ? 1 : 0;
   RTCLog(@"Initializing AudioUnit, _enable_input=%d", (int) _enable_input);
+  // Basic test log to verify Initialize is called
+  NSLog(@"VIKAS 🚀 VoiceProcessingAudioUnit::Initialize() CALLED with enable_input=%d", enable_input);
+  
+  // Log the current input device again at initialization time
+  if (enable_input) {
+    RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+    if (session.currentRoute.inputs.count > 0) {
+      AVAudioSessionPortDescription* currentInput = session.currentRoute.inputs.firstObject;
+      NSLog(@"VIKAS 🎤 VoiceProcessingAudioUnit::Initialize - About to enable input on device: %@ (type: %@)", 
+             currentInput.portName, currentInput.portType);
+    } else {
+      NSLog(@"VIKAS 🎤 VoiceProcessingAudioUnit::Initialize - Warning: Enabling input but no input device found in route");
+    }
+  }
+  
   result = AudioUnitSetProperty(vpio_unit_, kAudioOutputUnitProperty_EnableIO,
                                 kAudioUnitScope_Input, kInputBus, &_enable_input,
                                 sizeof(_enable_input));
@@ -333,14 +369,25 @@ bool VoiceProcessingAudioUnit::Initialize(Float64 sample_rate, bool enable_input
 
 OSStatus VoiceProcessingAudioUnit::Start() {
   RTC_DCHECK_GE(state_, kUninitialized);
-  RTCLog(@"Starting audio unit.");
+  NSLog(@"VIKAS 🚀 VoiceProcessingAudioUnit::Start() CALLED");
+  NSLog(@"Starting audio unit.");
+
+  // Log the final input device that will be used when starting
+  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+  if (session.currentRoute.inputs.count > 0) {
+    AVAudioSessionPortDescription* currentInput = session.currentRoute.inputs.firstObject;
+    NSLog(@"VIKAS 🎤 VoiceProcessingAudioUnit::Start - Starting audio unit with input device: %@ (type: %@)", 
+           currentInput.portName, currentInput.portType);
+  } else {
+    NSLog(@"VIKAS 🎤 VoiceProcessingAudioUnit::Start - Warning: Starting audio unit but no input device in route");
+  }
 
   OSStatus result = AudioOutputUnitStart(vpio_unit_);
   if (result != noErr) {
-    RTCLogError(@"Failed to start audio unit. Error=%ld", (long)result);
+    NSLog(@"VIKAS Failed to start audio unit. Error=%ld", (long)result);
     return result;
   } else {
-    RTCLog(@"Started audio unit");
+    NSLog(@"VIKAS Started audio unit");
   }
   state_ = kStarted;
   return noErr;

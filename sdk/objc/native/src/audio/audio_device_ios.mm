@@ -771,6 +771,7 @@ void AudioDeviceIOS::SetupAudioBuffersForActiveAudioSession() {
 bool AudioDeviceIOS::CreateAudioUnit() {
   RTC_DCHECK(!audio_unit_);
 
+  NSLog(@"VIKAS 🚀 AudioDeviceIOS::CreateAudioUnit() CALLED");
   audio_unit_.reset(new VoiceProcessingAudioUnit(bypass_voice_processing_, this));
   if (!audio_unit_->Init()) {
     audio_unit_.reset();
@@ -923,6 +924,7 @@ void AudioDeviceIOS::UnconfigureAudioSession() {
 
 bool AudioDeviceIOS::InitPlayOrRecord(bool enable_input) {
   LOGI() << "InitPlayOrRecord";
+  NSLog(@"VIKAS 🚀 AudioDeviceIOS::InitPlayOrRecord() CALLED with enable_input=%d", enable_input);
   RTC_DCHECK_RUN_ON(thread_);
 
   // There should be no audio unit at this point.

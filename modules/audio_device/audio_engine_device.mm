@@ -62,6 +62,7 @@ const size_t kAudioSampleSize = 2;  // Signed 16-bit integer
 AudioEngineDevice::AudioEngineDevice(bool voice_processing_bypassed)
     : task_queue_factory_(CreateDefaultTaskQueueFactory()), initialized_(false) {
   LOGI() << "voice_processing_bypassed " << voice_processing_bypassed;
+  NSLog(@"VIKAS 🚀 AudioEngineDevice CONSTRUCTOR called, voice_processing_bypassed=%d", voice_processing_bypassed);
 
   thread_ = rtc::Thread::Current();
   audio_device_buffer_.reset(new webrtc::AudioDeviceBuffer(task_queue_factory_.get()));
@@ -423,6 +424,7 @@ int32_t AudioEngineDevice::InitRecording() {
 
 int32_t AudioEngineDevice::StartRecording() {
   LOGI() << "StartRecording";
+  NSLog(@"VIKAS 🚀 AudioEngineDevice::StartRecording() CALLED");
   RTC_DCHECK_RUN_ON(thread_);
 
   int32_t result = ModifyEngineState([](EngineState state) -> EngineState {
@@ -1303,11 +1305,33 @@ bool AudioEngineDevice::IsMicrophonePermissionGranted() {
 }
 
 int32_t AudioEngineDevice::ModifyEngineState(
-    std::function<EngineState(EngineState)> state_transform) {
+std::function<EngineState(EngineState)> state_transform) {
   RTC_DCHECK_RUN_ON(thread_);
 
   EngineState old_state = engine_state_;
   EngineState new_state = state_transform(old_state);
+  
+  // Log when input is being enabled or audio configuration changes
+  if (new_state.input_enabled != old_state.input_enabled || 
+      new_state.input_running != old_state.input_running) {
+    NSLog(@"VIKAS 🚀 AudioEngineDevice::ModifyEngineState - Input state changing: enabled %d->%d, running %d->%d", 
+          old_state.input_enabled, new_state.input_enabled,
+          old_state.input_running, new_state.input_running);
+          
+    // Log current input device when enabling input
+    if (new_state.input_enabled && !old_state.input_enabled) {
+#if defined(WEBRTC_IOS)
+      RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+      if (session.currentRoute.inputs.count > 0) {
+        AVAudioSessionPortDescription* currentInput = session.currentRoute.inputs.firstObject;
+        NSLog(@"VIKAS 🎤 AudioEngineDevice - About to enable input on device: %@ (type: %@)", 
+              currentInput.portName, currentInput.portType);
+      } else {
+        NSLog(@"VIKAS 🎤 AudioEngineDevice - Warning: Enabling input but no input device found in route");
+      }
+#endif
+    }
+  }
   EngineStateUpdate state = {old_state, new_state};
 
   // No changes, return immediately.
@@ -1702,9 +1726,80 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
   if (state.next.IsAnyEnabled() &&
       (!state.prev.IsAnyEnabled() || state.IsEngineRecreateRequired())) {
     LOGI() << "Creating AVAudioEngine (device)...";
+    NSLog(@"VIKAS 🚀 Creating AVAudioEngine (device mode)");
     RTC_DCHECK(engine_device_ == nil);
 
+    // Log available inputs BEFORE creating AVAudioEngine
+#if defined(WEBRTC_IOS)
+    RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+    NSArray<AVAudioSessionPortDescription*>* inputsBefore = session.session.availableInputs;
+    NSLog(@"VIKAS 🎤 BEFORE AVAudioEngine init - Available inputs (%lu total):", (unsigned long)inputsBefore.count);
+    for (AVAudioSessionPortDescription* input in inputsBefore) {
+      NSLog(@"VIKAS 🎤    %@ (type: %@)", input.portName, input.portType);
+    }
+#endif
+
     engine_device_ = [[AVAudioEngine alloc] init];
+    
+    // Log available inputs AFTER creating AVAudioEngine
+#if defined(WEBRTC_IOS)
+    NSArray<AVAudioSessionPortDescription*>* inputsAfter = session.session.availableInputs;
+    NSLog(@"VIKAS 🎤 AFTER AVAudioEngine init - Available inputs (%lu total):", (unsigned long)inputsAfter.count);
+    for (AVAudioSessionPortDescription* input in inputsAfter) {
+      NSLog(@"VIKAS 🎤    %@ (type: %@)", input.portName, input.portType);
+    }
+    
+    // VIKAS: Attempt to preserve USB device during inputNode access
+    AVAudioSessionPortDescription* originalInput = session.currentRoute.inputs.firstObject;
+    BOOL wasUSBDevice = [originalInput.portType isEqualToString:AVAudioSessionPortUSBAudio];
+    
+    if (wasUSBDevice) {
+      NSLog(@"VIKAS 🎤 USB device detected before inputNode access: %@", originalInput.portName);
+      NSLog(@"VIKAS 🎤 Attempting careful inputNode access to preserve USB device...");
+    }
+    
+    // Access inputNode with potential USB device recovery
+    AVAudioInputNode* inputNode = engine_device_.inputNode;
+    NSLog(@"VIKAS 🎤 AVAudioEngine inputNode created: %@", inputNode);
+    NSLog(@"VIKAS 🎤 AVAudioEngine inputNode hardware format: %@", [inputNode inputFormatForBus:0]);
+
+    // Check if USB device was lost during inputNode access
+    AVAudioSessionPortDescription* currentInput = session.currentRoute.inputs.firstObject;
+    BOOL isStillUSB = [currentInput.portType isEqualToString:AVAudioSessionPortUSBAudio];
+    
+    if (wasUSBDevice && !isStillUSB) {
+      NSLog(@"VIKAS 🎤 ⚠️ USB device LOST during inputNode access! Attempting recovery...");
+      
+      // Try to restore USB device
+      if (session.session.availableInputs) {
+        for (AVAudioSessionPortDescription* input in session.session.availableInputs) {
+          if ([input.portType isEqualToString:AVAudioSessionPortUSBAudio]) {
+            NSLog(@"VIKAS 🎤 Found USB device in availableInputs, attempting restore: %@", input.portName);
+            @try {
+              NSError* error = nil;
+              [session setPreferredInput:input error:&error];
+              [session.session setActive:NO error:&error];
+              [session.session setActive:YES error:&error];
+              NSLog(@"VIKAS 🎤 USB device restore attempt completed");
+              break;
+            } @catch (NSException* exception) {
+              NSLog(@"VIKAS 🎤 USB device restore failed: %@", exception.reason);
+            }
+          }
+        }
+      }
+    }
+
+    NSLog(@"VIKAS 🎤 AFTER AVAudioInputNode - Available inputs (%lu total):", (unsigned long)inputsAfter.count);
+    for (AVAudioSessionPortDescription* input in inputsAfter) {
+      NSLog(@"VIKAS 🎤 AFTER AVAudioInputNode    %@ (type: %@)", input.portName, input.portType);
+    }
+
+    // Final check of current input
+    currentInput = session.currentRoute.inputs.firstObject;
+    NSLog(@"VIKAS 🎤 AVAudioEngine should be using input device: %@ (type: %@)", 
+          currentInput.portName, currentInput.portType);
+#endif
 
     rollback_actions.push_back([=]() {
       RTC_DCHECK_RUN_ON(thread_);
@@ -1764,13 +1859,33 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
   //
   if (state.next.IsInputEnabled() &&
       inputNode().voiceProcessingEnabled != state.next.voice_processing_enabled) {
-    LOGI() << "setVoiceProcessingEnabled (input): " << state.next.voice_processing_enabled ? "YES"
-                                                                                           : "NO";
+    
+    // VIKAS: Check if current input is USB device and conditionally disable voice processing
+    BOOL shouldEnableVP = state.next.voice_processing_enabled;
+    
+#if defined(WEBRTC_IOS)
+    RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+    AVAudioSessionPortDescription* currentInput = session.currentRoute.inputs.firstObject;
+    if (currentInput && [currentInput.portType isEqualToString:AVAudioSessionPortUSBAudio]) {
+      shouldEnableVP = NO;  // Force disable VP for USB devices
+      NSLog(@"VIKAS 🎤 USB device detected (%@) - disabling voice processing to preserve device", currentInput.portName);
+      LOGI() << "USB device detected - disabling voice processing to preserve device compatibility";
+    }
+#endif
+    
+    LOGI() << "setVoiceProcessingEnabled (input): " << shouldEnableVP ? "YES" : "NO";
+#if defined(WEBRTC_IOS)
+    if (currentInput) {
+      LOGI() << "Current input device: " << [currentInput.portName UTF8String] 
+             << " (type: " << [currentInput.portType UTF8String] << ")";
+    }
+#endif
+    
     NSError* error = nil;
-    BOOL set_vp_result = [inputNode() setVoiceProcessingEnabled:state.next.voice_processing_enabled
+    BOOL set_vp_result = [inputNode() setVoiceProcessingEnabled:shouldEnableVP
                                                           error:&error];
     if (!set_vp_result) {
-      NSLog(@"AudioEngineDevice setVoiceProcessingEnabled error: %@", error.localizedDescription);
+      NSLog(@"VIKAS 🎤 AudioEngineDevice setVoiceProcessingEnabled error: %@", error.localizedDescription);
       RTC_DCHECK(set_vp_result);
     }
     LOGI() << "setVoiceProcessingEnabled (input) result: " << set_vp_result ? "YES" : "NO";
@@ -1921,8 +2036,32 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
   if (state.next.IsInputEnabled() &&
       (!state.prev.IsInputEnabled() || state.IsEngineRecreateRequired())) {
     LOGI() << "Enabling input for AVAudioEngine...";
+    NSLog(@"VIKAS 🚀 Enabling input for AVAudioEngine");
+    
+    // Log which device AVAudioEngine will actually use
+#if defined(WEBRTC_IOS)
+    RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+    if (session.currentRoute.inputs.count > 0) {
+      AVAudioSessionPortDescription* currentInput = session.currentRoute.inputs.firstObject;
+      NSLog(@"VIKAS 🎤 AVAudioEngine about to use input device: %@ (type: %@)", 
+            currentInput.portName, currentInput.portType);
+      
+      // Log all available inputs to see if USB mic is still there
+      NSArray<AVAudioSessionPortDescription*>* availableInputs = session.session.availableInputs;
+      NSLog(@"VIKAS 🎤 Available inputs at this point (%lu total):", (unsigned long)availableInputs.count);
+      for (AVAudioSessionPortDescription* input in availableInputs) {
+        NSString* marker = [input isEqual:currentInput] ? @"✅ ACTIVE" : @"  ";
+        NSLog(@"VIKAS 🎤 %@ %@ (type: %@)", marker, input.portName, input.portType);
+      }
+    }
+#endif
+    
     RTC_DCHECK(!engine_device_.running);
-
+    
+    // Log available devices again to see if they change during configuration
+#if defined(WEBRTC_IOS)
+    NSLog(@"VIKAS 🎤 About to start AVAudioEngine configuration...");
+#endif
     // Apple: When the engine renders to and from an audio device, the AVAudioSession category and
     // the availability of hardware determines whether an app performs input (for example, input
     // hardware isn’t available in tvOS). Check the input node’s input format (specifically, the
@@ -1989,6 +2128,13 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
     AVAudioSinkNodeReceiverBlock sink_block = ^OSStatus(const AudioTimeStamp* timestamp,
                                                         AVAudioFrameCount frameCount,
                                                         const AudioBufferList* inputData) {
+      static int audio_frame_count = 0;
+      audio_frame_count++;
+      if (audio_frame_count % 100 == 1) { // Log every 100th frame to avoid spam
+        NSLog(@"VIKAS 🎤 AUDIO DATA FLOWING: Frame %d, %u samples from input device", 
+              audio_frame_count, (unsigned int)frameCount);
+      }
+      
       RTC_DCHECK(inputData->mNumberBuffers == 1);
 
       AudioBufferList* converter_buffer_abl =
@@ -2040,8 +2186,34 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
     LOGI() << "input mixer connection count: " << input_mixer_connections.count;
     if (input_mixer_connections.count == 0) {
       LOGI() << "Nothing connected to input mixer, connecting input node...";
-      // Default implementation.
+      
+#if defined(WEBRTC_IOS)
+      // Check USB device availability RIGHT before the critical connection
+      RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+      NSArray<AVAudioSessionPortDescription*>* beforeConnect = session.session.availableInputs;
+      NSLog(@"VIKAS 🎤 BEFORE inputNode connection - Available inputs (%lu total):", (unsigned long)beforeConnect.count);
+      for (AVAudioSessionPortDescription* input in beforeConnect) {
+        NSLog(@"VIKAS 🎤    %@ (type: %@)", input.portName, input.portType);
+      }
+#endif
+      
+      // Default implementation - THIS IS THE CRITICAL LINE
       [engine_device_ connect:inputNode() to:input_mixer_node_ format:engine_input_format];
+      
+#if defined(WEBRTC_IOS)
+      // Check USB device availability RIGHT after the critical connection
+      NSArray<AVAudioSessionPortDescription*>* afterConnect = session.session.availableInputs;
+      NSLog(@"VIKAS 🎤 AFTER inputNode connection - Available inputs (%lu total):", (unsigned long)afterConnect.count);
+      for (AVAudioSessionPortDescription* input in afterConnect) {
+        NSLog(@"VIKAS 🎤    %@ (type: %@)", input.portName, input.portType);
+      }
+      
+      if (session.currentRoute.inputs.count > 0) {
+        AVAudioSessionPortDescription* finalInput = session.currentRoute.inputs.firstObject;
+        NSLog(@"VIKAS 🎤 Final active input after connection: %@ (type: %@)", 
+              finalInput.portName, finalInput.portType);
+      }
+#endif
     }
 
     sink_node_ = [[AVAudioSinkNode alloc] initWithReceiverBlock:sink_block];
@@ -2260,6 +2432,23 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
       }
 
       LOGI() << "Starting AVAudioEngine...";
+      NSLog(@"VIKAS 🚀 Starting AVAudioEngine - Final step!");
+      
+      // Log final confirmation of which device will be used
+#if defined(WEBRTC_IOS)
+      RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
+      if (session.currentRoute.inputs.count > 0) {
+        AVAudioSessionPortDescription* currentInput = session.currentRoute.inputs.firstObject;
+        NSLog(@"VIKAS 🎤 AVAudioEngine STARTING with input device: %@ (type: %@)", 
+              currentInput.portName, currentInput.portType);
+        
+        // Log if we're starting with a USB device so we can track if it gets lost
+        if ([currentInput.portType isEqualToString:AVAudioSessionPortUSBAudio]) {
+          NSLog(@"VIKAS 🎤 📌 Starting engine with USB device - will monitor for device loss");
+        }
+      }
+#endif
+      
       BOOL start_result = false;
       int start_retry_count = 0;
 
@@ -2304,6 +2493,37 @@ int32_t AudioEngineDevice::ApplyDeviceEngineState(EngineStateUpdate state) {
       }
 
       if (start_result) {
+        // VIKAS: Check if USB device was lost during engine start and attempt recovery
+#if defined(WEBRTC_IOS)
+        AVAudioSessionPortDescription* postStartInput = session.currentRoute.inputs.firstObject;
+        if (postStartInput) {
+          NSLog(@"VIKAS 🎤 Post-start input device: %@ (type: %@)", postStartInput.portName, postStartInput.portType);
+          
+          // Check if we lost a USB device during engine start
+          BOOL isCurrentlyUSB = [postStartInput.portType isEqualToString:AVAudioSessionPortUSBAudio];
+          if (!isCurrentlyUSB) {
+            // Look for USB device in available inputs
+            for (AVAudioSessionPortDescription* input in session.session.availableInputs) {
+              if ([input.portType isEqualToString:AVAudioSessionPortUSBAudio]) {
+                NSLog(@"VIKAS 🎤 ⚠️ USB device lost during engine start! Attempting recovery: %@", input.portName);
+                @try {
+                  NSError* error = nil;
+                  [session setPreferredInput:input error:&error];
+                  if (error) {
+                    NSLog(@"VIKAS 🎤 USB recovery error: %@", error.localizedDescription);
+                  } else {
+                    NSLog(@"VIKAS 🎤 USB device recovery successful after engine start");
+                  }
+                } @catch (NSException* exception) {
+                  NSLog(@"VIKAS 🎤 USB recovery exception: %@", exception.reason);
+                }
+                break;
+              }
+            }
+          }
+        }
+#endif
+        
         RTC_DCHECK(configuration_observer_ == nullptr);
         // Add observer for configuration changes
         NSNotificationCenter* center = [NSNotificationCenter defaultCenter];

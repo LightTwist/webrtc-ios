@@ -798,18 +798,17 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
   NSError *error = nil;
   
   // Log available inputs BEFORE configuration
-  NSArray<AVAudioSessionPortDescription*>* availableInputs = self.session.availableInputs;
-  NSLog(@"VIKAS 🎯 BEFORE setConfiguration - Available inputs (%lu total):", (unsigned long)availableInputs.count);
-  for (AVAudioSessionPortDescription* input in availableInputs) {
-    NSLog(@"VIKAS 🎯    %@ (type: %@)", input.portName, input.portType);
-  }
+  // NSArray<AVAudioSessionPortDescription*>* availableInputs = self.session.availableInputs;
+  // NSLog(@"VIKAS 🎯 BEFORE setConfiguration - Available inputs (%lu total):", (unsigned long)availableInputs.count);
+  // for (AVAudioSessionPortDescription* input in availableInputs) {
+  //   NSLog(@"VIKAS 🎯    %@ (type: %@)", input.portName, input.portType);
+  // }
   
   if (self.currentRoute.inputs.count > 0) {
     AVAudioSessionPortDescription* currentInput = self.currentRoute.inputs.firstObject;
-    NSLog(@"VIKAS 🎯 BEFORE setConfiguration - Current input: %@ (type: %@)", 
-          currentInput.portName, currentInput.portType);
+    //NSLog(@"VIKAS 🎯 BEFORE setConfiguration - Current input: %@ (type: %@)", currentInput.portName, currentInput.portType);
   } else {
-    NSLog(@"VIKAS 🎯 BEFORE setConfiguration - No current input route");
+    //NSLog(@"VIKAS 🎯 BEFORE setConfiguration - No current input route");
   }
   
   RTC_OBJC_TYPE(RTCAudioSessionConfiguration) *webRTCConfig =
@@ -824,20 +823,19 @@ ABSL_CONST_INIT thread_local bool mutex_locked = false;
     return NO;
   }
   
-  // Log available inputs AFTER configuration
-  availableInputs = self.session.availableInputs;
-  NSLog(@"VIKAS 🎯 AFTER setConfiguration - Available inputs (%lu total):", (unsigned long)availableInputs.count);
-  for (AVAudioSessionPortDescription* input in availableInputs) {
-    NSLog(@"VIKAS 🎯    %@ (type: %@)", input.portName, input.portType);
-  }
+  // // Log available inputs AFTER configuration
+  // availableInputs = self.session.availableInputs;
+  // NSLog(@"VIKAS 🎯 AFTER setConfiguration - Available inputs (%lu total):", (unsigned long)availableInputs.count);
+  // for (AVAudioSessionPortDescription* input in availableInputs) {
+  //   NSLog(@"VIKAS 🎯    %@ (type: %@)", input.portName, input.portType);
+  // }
   
-  if (self.currentRoute.inputs.count > 0) {
-    AVAudioSessionPortDescription* currentInput = self.currentRoute.inputs.firstObject;
-    NSLog(@"VIKAS 🎯 AFTER setConfiguration - Current input: %@ (type: %@)", 
-          currentInput.portName, currentInput.portType);
-  } else {
-    NSLog(@"VIKAS 🎯 AFTER setConfiguration - No current input route");
-  }
+  // if (self.currentRoute.inputs.count > 0) {
+  //   AVAudioSessionPortDescription* currentInput = self.currentRoute.inputs.firstObject;
+  //   NSLog(@"VIKAS 🎯 AFTER setConfiguration - Current input: %@ (type: %@)", currentInput.portName, currentInput.portType);
+  // } else {
+  //   NSLog(@"VIKAS 🎯 AFTER setConfiguration - No current input route");
+  // }
 
 #if !TARGET_OS_TV
   // Ensure that the device currently supports audio input.
